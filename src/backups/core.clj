@@ -177,7 +177,7 @@
 (defn parse-mount-description
   [volume-id mount-point out-mount-info]
   (let [mount-line (->> (str/split-lines out-mount-info)
-                        (filter #(and (str/includes? volume-id %) (str/includes? mount-point %)))
+                        (filter #(and (str/includes? % volume-id) (str/includes? % mount-point)))
                         (first))]
     (if (some? mount-line)
       (either/right mount-line)
@@ -195,8 +195,11 @@
   "
   [volume-id]
   (let [sh-result (run-list-mapper volume-id)
-        ls-not-found-exit-code 2]
-    (if (= ls-not-found-exit-code (:exit sh-result))
+        sh-exit (:exit sh-result)
+        exit-success 0
+        exit-not-found 2
+        allowed-exits #{exit-success exit-not-found}]
+    (if (contains? allowed-exits sh-exit)
       (either/right sh-result)
       (either/left sh-result))))
 
@@ -209,18 +212,19 @@
 
 (defn unmount-volume-m! [volume-id mount-point]
   (cats/>>
+    ; note: order matters - `umount /dev/mapper/alias` before `umount mount-point`
+    (cats/>>= (run-list-mapper-m volume-id)
+              (fn [v]
+                (if (zero? (:exit v))
+                  (run-unmount-volume-m (id->mapper-path volume-id))
+                  (cats/return v))))
     (cats/>>= (run-mount-info-m)
               sh-result->out-m
               (partial parse-mount-description volume-id mount-point)
               (fn [v]
                 (if (nil? v)
                   (cats/return v)
-                  (run-unmount-volume-m mount-point))))
-    (cats/>>= (run-list-mapper-m volume-id)
-              (fn [v]
-                (if (= 0 (:exit v))
-                  (run-unmount-volume-m (id->mapper-path volume-id))
-                  (cats/return v))))))
+                  (run-unmount-volume-m mount-point))))))
 
 ; endregion
 
@@ -351,7 +355,8 @@
 (defn handle-result
   "
   Default result-handling function.
-  Expects an 'either' instance. Writes the status of the operation to standard out."
+  Expects an 'either' instance. Writes the status of the operation to standard out.
+  "
   [either-result]
   (let [extracted-value (cats/extract either-result)]
     (if (either/left? either-result)
