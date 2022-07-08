@@ -76,12 +76,13 @@ The following commands are executed by __Backups__:
 
 * `ls -l /dev/disk/by-uuid`
 * `udisksctl info --block-device /dev/disk/by-uuid/$DEVICE_UUID`
-* `udisksctl unlock --block-device /dev/disk/by-uuid/$DEVICE_UUID"`
+* `udisksctl unlock --block-device /dev/disk/by-uuid/$DEVICE_UUID`
 * `mount`
 * `mount /dev/mapper/luks-$DEVICE_UUD $MOUNT_POINT`
 * `net usershare info --long`
-* `net usershare add $SHARE_NAME $MOUNT_POINT 'Network Backups' everyone:F guest_ok=n`
+* `net usershare add $SHARE_NAME $MOUNT_POINT $SHARE_COMMENT $SHARE_ACL $SHARE_GUESTS_OK?`
 * `net usershare delete $SHARE_NAME`
+* `umount $DEV_MAPPER_ALIAS`
 * `umount $MOUNT_POINT`
 * `udisksctl lock --block-device /dev/disk/by-uuid/$DEVICE_UUID"`
 

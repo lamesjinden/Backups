@@ -49,10 +49,20 @@
   (let [command-tokens (splitter command-str)]
     (apply sh command-tokens)))
 
-(defn sh->either [sh-result]
-  (let [exit-code (:exit sh-result)]
-    (if (zero? exit-code) (either/right sh-result)
-                          (either/left sh-result))))
+(defn sh->either
+  "
+  Returns sh-result wrapped in an instance of 'either'.
+  When sh-result has an 'exit' code contained in accepted-exit-codes, returns 'either/right';
+  otherwise, returns 'either/left'
+
+  By default, non-zero exit-codes are returned as 'either/left'
+  "
+  ([{:keys [exit] :as sh-result} accepted-exit-codes]
+   (if (contains? accepted-exit-codes exit)
+     (either/right sh-result)
+     (either/left sh-result)))
+  ([sh-result]
+   (sh->either sh-result #{0})))
 
 (defn sh-result->out-m [sh-result]
   (-> sh-result
@@ -174,7 +184,7 @@
                 (run-mount-volume-m volume-id mount-point)
                 (either/right 0)))))
 
-(defn parse-mount-description
+(defn parse-mount-description-m
   [volume-id mount-point out-mount-info]
   (let [mount-line (->> (str/split-lines out-mount-info)
                         (filter #(and (str/includes? % volume-id) (str/includes? % mount-point)))
@@ -194,14 +204,11 @@
   Other non-zero exit code results are returned as either/left.
   "
   [volume-id]
-  (let [sh-result (run-list-mapper volume-id)
-        sh-exit (:exit sh-result)
-        exit-success 0
-        exit-not-found 2
-        allowed-exits #{exit-success exit-not-found}]
-    (if (contains? allowed-exits sh-exit)
-      (either/right sh-result)
-      (either/left sh-result))))
+  (let [exit-success 0
+        exit-not-found 2]
+    (-> volume-id
+        (run-list-mapper)
+        (sh->either #{exit-success exit-not-found}))))
 
 (defn run-unmount-volume [mount-point]
   (let [command-str (format "umount %s" mount-point)]
@@ -214,13 +221,14 @@
   (cats/>>
     ; note: order matters - `umount /dev/mapper/alias` before `umount mount-point`
     (cats/>>= (run-list-mapper-m volume-id)
+              (fn [v] (sh->either v #{0 2}))
               (fn [v]
                 (if (zero? (:exit v))
                   (run-unmount-volume-m (id->mapper-path volume-id))
                   (cats/return v))))
     (cats/>>= (run-mount-info-m)
               sh-result->out-m
-              (partial parse-mount-description volume-id mount-point)
+              (partial parse-mount-description-m volume-id mount-point)
               (fn [v]
                 (if (nil? v)
                   (cats/return v)
@@ -292,22 +300,30 @@
             sh-result->out-m
             (partial validate-share-for-creation-by-section-m share-name mount-point)))
 
-(defn run-create-share [share-name mount-point & {:keys [acl allow-guests? comment]
-                                                  :or   {comment       "Network Backups"
-                                                         acl           "everyone:F"
-                                                         allow-guests? false}}]
-  (let [guests_ok (if allow-guests?
-                    "y"
-                    "n")
-        command-str (format "net usershare add %s %s '%s' %s guest_ok=%s" share-name mount-point comment acl guests_ok)]
+(def default-share-add-options {:share/comment    "Network Backups"
+                                :share/acl        "everyone:F"
+                                :share/guests_ok? "n"})
+
+(defn run-create-share
+  [share-name mount-point & {:share/keys [comment acl guests_ok?]
+                             :or         {comment    (:share/comment default-share-add-options)
+                                          acl        (:share/acl default-share-add-options)
+                                          guests_ok? (:share/guests_ok? default-share-add-options)}}]
+  (let [command-str (format "net usershare add %s %s '%s' %s guest_ok=%s" share-name mount-point comment acl guests_ok?)]
     (run-sh command-str)))
 
-(defn run-create-share-m [share-name mount-point & opts]
-  (sh->either (run-create-share share-name mount-point opts)))
+(defn run-create-share-m
+  ([share-name mount-point options]
+   (sh->either (run-create-share share-name mount-point options)))
+  ([share-name mount-point]
+   (run-create-share share-name mount-point)))
 
-(defn create-share-m! [share-name mount-point & opts]
-  (cats/>> (validate-share-for-creation-m! share-name mount-point)
-           (run-create-share-m share-name mount-point opts)))
+(defn create-share-m!
+  ([share-name mount-point options]
+   (cats/>> (validate-share-for-creation-m! share-name mount-point)
+            (run-create-share-m share-name mount-point options)))
+  ([share-name mount-point]
+   (create-share-m! share-name mount-point default-share-add-options)))
 
 (defn validate-share-for-deletion-by-section-m
   "
@@ -380,11 +396,12 @@
                              invoked at the conclusion of the operation."
   ([volume-id mount-point share-name & {:keys [starting-fn result-fn]
                                         :or   {starting-fn print-start-message
-                                               result-fn   handle-result}}]
+                                               result-fn   handle-result}
+                                        :as   options}]
    (starting-fn)
    (let [result (cats/>> (unlock-volume-m! volume-id)
                          (mount-volume-m! volume-id mount-point)
-                         (create-share-m! share-name mount-point))]
+                         (create-share-m! share-name mount-point options))]
      (result-fn result))))
 
 (defn unshare-and-unmount
