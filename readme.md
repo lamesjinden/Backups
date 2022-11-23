@@ -30,34 +30,20 @@ _After updating place-holder values in mount_template.clj and unmount_template.c
 
 Execute a _mount-and-share_ script to create a network share for the specified device. 
 
-from the repository root:
+from the repository root, via __babashka__, explicitly:
 
 ```bash
-chmod +x ./src/backups/mount_template.clj # make the script executable (one-time only)
-./src/backups/mount_template.clj
-```
-
-_or_ via __babashka__, explicitly:
-
-```bash
-bb ./src/backups/mount_template.clj
+bb -f ./src/backups/mount_template.clj
 ```
 
 ### unshare and unmount
 
 Similarly, execute an _unshare-and-unmount_ script to remove a network share and unmount the specified device.
 
-from the repository root:
+from the repository root, via __babashka__, explicitly:
 
 ```bash
-chmod +x ./src/backups/mount_template.clj # make the script executable (one-time only)
-./src/backups/unmount_template.clj
-```
-
-_or_ via __babashka__, explicitly:
-
-```bash
-bb ./src/backups/unmount_template.clj
+bb -f ./src/backups/unmount_template.clj
 ```
 
 ## assumptions
@@ -85,6 +71,7 @@ The following commands are executed by __Backups__:
 * `umount $DEV_MAPPER_ALIAS`
 * `umount $MOUNT_POINT`
 * `udisksctl lock --block-device /dev/disk/by-uuid/$DEVICE_UUID"`
+* `service smbd restart`
 
 ## todo
 

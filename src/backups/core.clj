@@ -9,6 +9,8 @@
 
 (def default-share-name "backups")
 
+(def log-commands? false)
+
 ; endregion
 
 ; region shell
@@ -47,6 +49,8 @@
 
 (defn run-sh [command-str]
   (let [command-tokens (splitter command-str)]
+    (when log-commands?
+      (println command-tokens))
     (apply sh command-tokens)))
 
 (defn sh->either
@@ -349,13 +353,21 @@
 
 (defn run-delete-share-m [share-name]
   (sh->either (run-delete-share share-name)))
+  
+(defn run-restart-smbd []
+  (let [command-str "service smbd restart"]
+   (run-sh command-str)))
+  
+(defn run-restart-smbd-m! [_share-name]
+ (sh->either (run-restart-smbd)))
 
 (defn delete-share-m! [share-name mount-point]
   (cats/>>= (validate-share-for-deletion-m! share-name mount-point)
-            (fn [validated-share-name]
+            (fn [validated-share-name]            
               (if (not (nil? validated-share-name))
                 (run-delete-share-m share-name)
-                (either/right share-name)))))
+                (either/right share-name)))
+            run-restart-smbd-m!))
 
 ; endregion
 
