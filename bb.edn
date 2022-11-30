@@ -1,1 +1,2 @@
-{:deps {local/deps {:local/root "."}}}
+{:paths ["src"]
+ :deps {local/deps {:local/root "."}}}

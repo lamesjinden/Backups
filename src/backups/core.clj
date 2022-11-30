@@ -1,22 +1,25 @@
 (ns backups.core
-  (:require [clojure.java.shell :refer [sh]]
-            [clojure.string :as str]
+  (:require [babashka.process :as p]
+            [backups.console :as console]
             [cats.core :as cats]
             [cats.monad.either :as either]
-            [cats.monad.maybe :as maybe]))
+            [cats.monad.maybe :as maybe]
+            [clojure.java.io :as io]
+            [clojure.java.shell :refer [sh]]
+            [clojure.string :as str]))
 
 ; region defaults
 
 (def default-share-name "backups")
 
-(def log-commands? false)
+(def ^:dynamic *log-commands?* false)
 
 ; endregion
 
 ; region shell
 
 (defn print-start-message
-  ([file-name] (println (format "%s: Executing" file-name)))
+  ([file-name] (console/println-green (format "%s: Executing" file-name)))
   ([] (print-start-message *file*)))
 
 (defn splitter
@@ -28,28 +31,28 @@
   [s]
   ((fn step [xys]
      (lazy-seq
-       (when-let [c (ffirst xys)]
-         (cond
-           (Character/isWhitespace ^char c)
-           (step (rest xys))
-           (= \' c)
-           (let [[w* r*]
-                 (split-with (fn [[x y]]
-                               (or (not= \' x)
-                                   (not (or (nil? y)
-                                            (Character/isWhitespace ^char y)))))
-                             (rest xys))]
-             (if (= \' (ffirst r*))
-               (cons (apply str (map first w*)) (step (rest r*)))
-               (cons (apply str (map first w*)) nil)))
-           :else
-           (let [[w r] (split-with (fn [[x _y]] (not (Character/isWhitespace ^char x))) xys)]
-             (cons (apply str (map first w)) (step r)))))))
+      (when-let [c (ffirst xys)]
+        (cond
+          (Character/isWhitespace ^char c)
+          (step (rest xys))
+          (= \' c)
+          (let [[w* r*]
+                (split-with (fn [[x y]]
+                              (or (not= \' x)
+                                  (not (or (nil? y)
+                                           (Character/isWhitespace ^char y)))))
+                            (rest xys))]
+            (if (= \' (ffirst r*))
+              (cons (apply str (map first w*)) (step (rest r*)))
+              (cons (apply str (map first w*)) nil)))
+          :else
+          (let [[w r] (split-with (fn [[x _y]] (not (Character/isWhitespace ^char x))) xys)]
+            (cons (apply str (map first w)) (step r)))))))
    (partition 2 1 (lazy-cat s [nil]))))
 
 (defn run-sh [command-str]
   (let [command-tokens (splitter command-str)]
-    (when log-commands?
+    (when *log-commands?*
       (println command-tokens))
     (apply sh command-tokens)))
 
@@ -62,9 +65,10 @@
   By default, non-zero exit-codes are returned as 'either/left'
   "
   ([{:keys [exit] :as sh-result} accepted-exit-codes]
-   (if (contains? accepted-exit-codes exit)
-     (either/right sh-result)
-     (either/left sh-result)))
+   (let [accepted (into #{} accepted-exit-codes)]
+     (if (contains? accepted exit)
+       (either/right sh-result)
+       (either/left sh-result))))
   ([sh-result]
    (sh->either sh-result #{0})))
 
@@ -72,6 +76,28 @@
   (-> sh-result
       (:out)
       (cats/return)))
+
+(defn run-process
+  "Lower-level subproc facility, based on Babashka.Process"
+  ([command {:keys [out-file] :as opts}]
+   (let [inherit-io (not out-file)
+         default-opts {:shutdown p/destroy-tree}
+         stream-opts (if inherit-io
+                       {:inherit true}
+                       (do
+                         (with-open [w (io/writer out-file)]
+                           (.write w (format "%s\n" command)))
+                         (let [output-stream (java.io.FileOutputStream. ^String out-file true)]
+                           {:inherit false
+                            :out     output-stream
+                            :err     output-stream})))
+         combined-opts (merge default-opts opts stream-opts)
+         proc (p/process
+               command
+               combined-opts)]
+     (deref proc)))
+  ([command]
+   (run-process command {})))
 
 ; endregion
 
@@ -125,13 +151,13 @@
 
 (defn unlock-volume-m! [volume-id]
   (cats/>>=
-    (cats/>> (validate-volume-m! volume-id) (run-volume-info-m volume-id))
-    sh-result->out-m
-    locked-m?
-    (fn [locked]
-      (if locked
-        (run-unlock-volume-m volume-id)
-        (either/right volume-id)))))
+   (cats/>> (validate-volume-m! volume-id) (run-volume-info-m volume-id))
+   sh-result->out-m
+   locked-m?
+   (fn [locked]
+     (if locked
+       (run-unlock-volume-m volume-id)
+       (either/right volume-id)))))
 
 (defn run-lock-volume [volume-id]
   (let [command-str (format "udisksctl lock --block-device /dev/disk/by-uuid/%s" volume-id)]
@@ -165,9 +191,9 @@
 
 (defn mounted? [volume-id mount-point out-mount-info]
   (some?
-    (seq (->> (str/split-lines out-mount-info)
-              (filter #(and (str/includes? % volume-id)
-                            (str/includes? % mount-point)))))))
+   (seq (->> (str/split-lines out-mount-info)
+             (filter #(and (str/includes? % volume-id)
+                           (str/includes? % mount-point)))))))
 
 (defn mounted?-m [volume-id mount-point out-mount-info]
   (cats/return (mounted? volume-id mount-point out-mount-info)))
@@ -224,19 +250,19 @@
 (defn unmount-volume-m! [volume-id mount-point]
   (cats/>>
     ; note: order matters - `umount /dev/mapper/alias` before `umount mount-point`
-    (cats/>>= (run-list-mapper-m volume-id)
-              (fn [v] (sh->either v #{0 2}))
-              (fn [v]
-                (if (zero? (:exit v))
-                  (run-unmount-volume-m (id->mapper-path volume-id))
-                  (cats/return v))))
-    (cats/>>= (run-mount-info-m)
-              sh-result->out-m
-              (partial parse-mount-description-m volume-id mount-point)
-              (fn [v]
-                (if (nil? v)
-                  (cats/return v)
-                  (run-unmount-volume-m mount-point))))))
+   (cats/>>= (run-list-mapper-m volume-id)
+             (fn [v] (sh->either v #{0 2}))
+             (fn [v]
+               (if (zero? (:exit v))
+                 (run-unmount-volume-m (id->mapper-path volume-id))
+                 (cats/return v))))
+   (cats/>>= (run-mount-info-m)
+             sh-result->out-m
+             (partial parse-mount-description-m volume-id mount-point)
+             (fn [v]
+               (if (nil? v)
+                 (cats/return v)
+                 (run-unmount-volume-m mount-point))))))
 
 ; endregion
 
@@ -353,17 +379,17 @@
 
 (defn run-delete-share-m [share-name]
   (sh->either (run-delete-share share-name)))
-  
+
 (defn run-restart-smbd []
   (let [command-str "service smbd restart"]
-   (run-sh command-str)))
-  
+    (run-sh command-str)))
+
 (defn run-restart-smbd-m! [_share-name]
- (sh->either (run-restart-smbd)))
+  (sh->either (run-restart-smbd)))
 
 (defn delete-share-m! [share-name mount-point]
   (cats/>>= (validate-share-for-deletion-m! share-name mount-point)
-            (fn [validated-share-name]            
+            (fn [validated-share-name]
               (if (not (nil? validated-share-name))
                 (run-delete-share-m share-name)
                 (either/right share-name)))
@@ -374,11 +400,11 @@
 ; region result handling
 
 (defn -handle-failure [failure-value]
-  (println (format "%s: Failure: %s" *file* failure-value))
+  (console/println-red (format "%s: Failure: %s" *file* failure-value))
   (System/exit 1))
 
 (defn -handle-success [& _success-value]
-  (println (format "%s: Completed" *file*)))
+  (console/println-green (format "%s: Completed" *file*)))
 
 (defn handle-result
   "
