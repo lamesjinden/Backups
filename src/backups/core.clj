@@ -151,7 +151,8 @@
 
 (defn unlock-volume-m! [volume-id]
   (cats/>>=
-   (cats/>> (validate-volume-m! volume-id) (run-volume-info-m volume-id))
+   (cats/do-let (validate-volume-m! volume-id)
+                (run-volume-info-m volume-id))
    sh-result->out-m
    locked-m?
    (fn [locked]
@@ -350,8 +351,8 @@
 
 (defn create-share-m!
   ([share-name mount-point options]
-   (cats/>> (validate-share-for-creation-m! share-name mount-point)
-            (run-create-share-m share-name mount-point options)))
+   (cats/do-let (validate-share-for-creation-m! share-name mount-point)
+                (run-create-share-m share-name mount-point options)))
   ([share-name mount-point]
    (create-share-m! share-name mount-point default-share-add-options)))
 
@@ -437,9 +438,9 @@
                                                result-fn   handle-result}
                                         :as   options}]
    (starting-fn)
-   (let [result (cats/>> (unlock-volume-m! volume-id)
-                         (mount-volume-m! volume-id mount-point)
-                         (create-share-m! share-name mount-point options))]
+   (let [result (cats/do-let (unlock-volume-m! volume-id)
+                             (mount-volume-m! volume-id mount-point)
+                             (create-share-m! share-name mount-point options))]
      (result-fn result))))
 
 (defn unshare-and-unmount
@@ -458,9 +459,9 @@
                                         :or   {starting-fn print-start-message
                                                result-fn   handle-result}}]
    (starting-fn)
-   (let [result (cats/>> (delete-share-m! share-name mount-point)
-                         (unmount-volume-m! volume-id mount-point)
-                         (lock-volume-m! volume-id))]
+   (let [result (cats/do-let (delete-share-m! share-name mount-point)
+                             (unmount-volume-m! volume-id mount-point)
+                             (lock-volume-m! volume-id))]
      (result-fn result))))
 
 ; endregion
