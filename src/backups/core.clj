@@ -80,6 +80,8 @@
 (defn run-process
   "Lower-level subproc facility, based on Babashka.Process"
   ([command {:keys [out-file] :as opts}]
+   (when *log-commands?*
+     (println command))
    (let [inherit-io (not out-file)
          default-opts {:shutdown p/destroy-tree}
          stream-opts (if inherit-io
@@ -206,6 +208,14 @@
 (defn run-mount-volume-m [volume-id mount-point]
   (sh->either (run-mount-volume volume-id mount-point)))
 
+(defn run-create-backups-symlink! [target link-name]
+  (let [link-name (format "/mnt/%s" link-name)
+	command-str (format "ln -sfn '%s' '%s'" target link-name)]
+    (run-sh command-str)))
+
+(defn run-create-backups-symlink-m! [mount-point link-name]
+  (sh->either (run-create-backups-symlink! mount-point link-name)))
+
 (defn mount-volume-m! [volume-id mount-point]
   (cats/>>= (run-mount-info-m)
             sh-result->out-m
@@ -213,7 +223,9 @@
             (fn [mounted]
               (if (not mounted)
                 (run-mount-volume-m volume-id mount-point)
-                (either/right 0)))))
+                (either/right 0)))
+            (fn [_] 
+              (run-create-backups-symlink-m! mount-point default-share-name))))
 
 (defn parse-mount-description-m
   [volume-id mount-point out-mount-info]
