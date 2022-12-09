@@ -10,18 +10,14 @@
             [scheduling.shutdown :as vshutdown]
             [scheduling.vbox :as vbox]))
 
-(def ^:dynamic *logging-enabled?* false)
-
-(defn log-header [msg]
-  (console/println-blue msg))
-
-(defn log [msg]
-  (when *logging-enabled?*
-    (println msg)))
-
 ; todo
 ;   * mount the backup share via `gio mount` to avoid need to execute as root
+;   * rsync instead of cifs mount?
+;     * prompt for each rsync source directory?
+;     * could mounting on the host create a symlink for /mnt/backups that points to the current drive?
 ;   * wrap use of try-conform with cats.monad.exception/try
+
+(def ^:dynamic *logging-enabled?* false)
 
 (s/def ::username string?)
 (s/def ::userid string?)
@@ -53,26 +49,71 @@
 
 (s/def ::start-fn fn?)
 (s/def ::result-fn fn?)
-(s/def ::deja-config (s/keys :req [::mount-config]
-                             :opt [::duplicity-config
+(s/def ::deja-config (s/keys :opt [::mount-config
+                                   ::duplicity-config
                                    ::rsync-config
                                    ::start-fn
                                    ::result-fn]))
 
+(defn- log-header [msg]
+  (console/println-blue msg))
+
+(defn- log [msg]
+  (when *logging-enabled?*
+    (println msg)))
+
+(defn- log-noop []
+  (log "  nothing to do"))
+
+(defn- log-skipped []
+  (log "  skipped"))
+
+(defn- when-not-nil-m
+  "
+   when config is not nil, invokes mf, a monad-returning function.
+   otherwise returns either/right of nil and logs
+   "
+  [config mf]
+  (if (nil? config)
+    (do
+      (log-skipped)
+      (cats-either/right nil))
+    (mf)))
+
+(defn- when-not-empty-m
+  "
+   when coll is not empty, invokes mf, a monad-returning function.
+   otherwise returns either/rigth of nil and logs.
+   "
+  [coll mf]
+  (if (empty? coll)
+    (do
+      (log-noop)
+      (cats-either/right nil))
+    (mf)))
+
 (defn- try-conform [spec x]
   (let [conformed (s/conform spec x)]
     (if (= conformed :clojure.spec.alpha/invalid)
-      (throw (ex-info (s/explain-str ::spec x)
-                      (s/explain-data ::spec x)))
+      (throw (ex-info (s/explain-str spec x)
+                      (s/explain-data spec x)))
       conformed)))
+
+(defn- try-conform-m [spec x]
+  (cats-ex/try-on (try-conform spec x)))
 
 ; region mounting
 
-(defn ->mount-command [config]
-  (let [conformed (try-conform ::mount-config config)
+(defn ->mount-command
+  "
+  returns a valid `mount` command for a cifs mount.
+  throws if mount-config does not conform.
+  "
+  [mount-config]
+  (let [conformed (try-conform ::mount-config mount-config)
         {:keys [::share-url ::share-mount ::id]} conformed
         {:keys [::username ::domain ::userid ::groupid]} id
-        command (format "mount -t cifs -o username=%s,dom=%s,uid=%s,gid=%s %s %s"
+        command (format "sudo mount -t cifs -o username=%s,dom=%s,uid=%s,gid=%s %s %s"
                         username
                         domain
                         userid
@@ -81,20 +122,23 @@
                         share-mount)]
     command))
 
-(defn run-mount-backups! [config]
-  (let [command (->mount-command config)]
+(defn run-mount-backups! [mount-config]
+  (let [command (->mount-command mount-config)]
     ; note: using run-sh caused a delay (longer than 60 seconds), awaiting to be prompted for cifs credentials.
     ;       switching to run-process does not display the above behavior.
     (core/run-process command)))
 
-(defn run-mount-backups-m! [config]
-  (let [result (run-mount-backups! config)]
+(defn run-mount-backups-m! [mount-config]
+  (let [result (run-mount-backups! mount-config)]
     (backups.core/sh->either result [0 32])))
 
-(defn mount-backups-share-m! [config]
+(defn mount-backups-share-m! [mount-config]
   (log-header "Mounting Backups share")
 
-  (run-mount-backups-m! config))
+  (when-not-nil-m
+   mount-config
+   (fn [] (cats/do-let (try-conform-m ::mount-config mount-config)
+                       (run-mount-backups-m! mount-config)))))
 
 ; endregion
 
@@ -103,12 +147,11 @@
 ;; "--dry-run"
 (def duplicity-default-args ["--no-encryption"
                              "--full-if-older-than 60D"
-                             "--volsize 100"
+                             "--volsize 1000"
                              "--timeout=120"
                              "--num-retries 5"
                              "--asynchronous-upload"
-                             "--verbosity=9"
-                             "--rsync-options=\"--progress\""])
+                             "--verbosity=8"])
 
 (defn ->include [include]
   (format "--include '%s'" include))
@@ -116,14 +159,19 @@
 (defn ->exclude [exclude]
   (format "--exclude '%s'" exclude))
 
-(defn ->duplicity-command [config]
-  (let [conformed (try-conform ::duplicity-config config)
+(defn ->duplicity-command
+  "
+  creates a valid `duplicity` command.
+  throws if duplicity-config does not conform.
+  "
+  [duplicity-config]
+  (let [conformed (try-conform ::duplicity-config duplicity-config)
         {:keys [::duplicity-args
                 ::duplicity-include-dirs
                 ::duplicity-exclude-dirs
                 ::duplicity-destination]} conformed
         duplicity-args (str/join " " duplicity-args)
-        gio? (or (str/starts-with? duplicity-destination "smb://") "")
+        gio? (str/starts-with? duplicity-destination "smb://")
         includes (->> duplicity-include-dirs
                       (map ->include)
                       (str/join " "))
@@ -133,36 +181,43 @@
         command (format "duplicity %s %s %s %s --exclude '**' / '%s'"
                         duplicity-args
                         (if gio? "--gio" "")
-                        includes
+                        ;; excludes before includes gives excludes precedence.
+                        ;; the assumption is that the include would be /home/userA
+                        ;; with excludes of /home/userA/Downloads, /home/userA/VirtualBox\ VMs
+                        ;; then, duplicity would backup all of /home/userA except but skip the excludes
                         excludes
+                        includes
                         duplicity-destination)]
     command))
 
-(defn run-duplicity-backup! [config]
-  (let [command (->duplicity-command config)]
+(defn run-duplicity-backup! [duplicity-config]
+  (let [command (->duplicity-command duplicity-config)]
     (backups.core/run-process command)))
 
-(defn run-duplicity-backup-m! [config]
-  (let [result (run-duplicity-backup! config)]
+(defn run-duplicity-backup-m! [duplicity-config]
+  (let [result (run-duplicity-backup! duplicity-config)]
     (backups.core/sh->either result)))
 
-(defn take-managed-backup-m! [config]
+(defn take-managed-backup-m! [duplicity-config]
   (log-header "Taking managed backup")
 
-  (let [conformed (try-conform ::duplicity-config config)
-        {:keys [::duplicity-include-dirs]} conformed]
-    (if (not-empty duplicity-include-dirs)
-      (run-duplicity-backup-m! config)
-      (do
-        (log "nothing to do")
-        (cats-either/right config)))))
+  (when-not-nil-m
+   duplicity-config
+   (fn [] (cats/do-let (try-conform-m ::duplicity-config duplicity-config)
+                       (let [{:keys [::duplicity-include-dirs]} duplicity-config]
+                         (when-not-empty-m
+                          duplicity-include-dirs
+                          (fn [] (run-duplicity-backup-m! duplicity-config))))))))
 
 ; endregion
 
 ; region rsync
 
 ;; "--dry-run"
-(def rsync-default-args ["-avuz" "--delete --progress"])
+(def rsync-default-args ["-avuz" 
+                         "--delete" 
+                         "--progress"
+                         "--timeout=120"])
 
 (defn stop-running-vm! [vm]
   (vshutdown/fancy-shutdown vm))
@@ -171,14 +226,12 @@
   (cats-either/try-either (stop-running-vm! vm)))
 
 (defn stop-running-vms-m! []
-  (let [running-vms (->> (vbox/get-all-running-vms)
-                         ; todo - remove filter
-                         (filter #(not= (:name %) "Dev")))]
+  (let [running-vms (vbox/get-all-running-vms)]
     (cats-ctx/with-context cats-ex/context
       (cats/mapseq stop-running-vm-m! running-vms))))
 
-(defn ->rsync-command [config rsync-source-dir]
-  (let [conformed (try-conform ::rsync-config config)
+(defn ->rsync-command [rsync-config rsync-source-dir]
+  (let [conformed (try-conform ::rsync-config rsync-config)
         {:keys [::rsync-args
                 ::rsync-destination]} conformed
         args (str/join " " rsync-args)
@@ -187,48 +240,60 @@
         command (format "rsync %s '%s' '%s'" args source destination)]
     command))
 
-(defn run-rsync-backup! [config rsync-source-dir]
-  (let [command (->rsync-command config rsync-source-dir)]
+(defn run-rsync-backup! [rsync-config rsync-source-dir]
+  (let [command (->rsync-command rsync-config rsync-source-dir)]
     (backups.core/run-process command)))
 
-(defn run-rsync-backup-m! [config rsync-source-dir]
-  (let [result (run-rsync-backup! config rsync-source-dir)]
+(defn run-rsync-backup-m! [rsync-config rsync-source-dir]
+  (let [result (run-rsync-backup! rsync-config rsync-source-dir)]
     (backups.core/sh->either result)))
 
-(defn take-unmanaged-backup-m! [config]
+(defn run-rsync-backups-m! [rsync-config rsync-source-dirs]
+  (cats-ctx/with-context cats-ex/context
+    (cats/mapseq #(run-rsync-backup-m! rsync-config %) rsync-source-dirs)))
+
+(defn take-unmanaged-backup-m! [rsync-config]
   (log-header "Taking unmanaged backup")
 
-  (let [conformed (try-conform ::rsync-config config)
-        {:keys [::rsync-source-dirs]} conformed]
-    (if (not-empty rsync-source-dirs)
-      (cats/do-let (stop-running-vms-m!)
-                   (cats-ctx/with-context cats-ex/context
-                     (cats/mapseq #(run-rsync-backup-m! config %) rsync-source-dirs)))
-      (do
-        (log "  nothing to do")
-        (cats-either/right config)))))
+  (when-not-nil-m
+   rsync-config
+   (fn []
+     (cats/do-let (try-conform-m ::rsync-config rsync-config)
+                  (let [{:keys [::rsync-source-dirs]} rsync-config]
+                    (when-not-empty-m
+                     rsync-source-dirs
+                     (fn [] (cats/do-let (stop-running-vms-m!)
+                                         (run-rsync-backups-m! rsync-config rsync-source-dirs)))))))))
 
 ; endregion
 
 ; region unmount
 
-(defn ->unmount-command [config]
-  (let [conformed (try-conform ::mount-config config)
+(defn ->unmount-command
+  "
+  returns a valid `umount` command for unmounting the cifs share.
+  throws if mount-config does not conform.
+  "
+  [mount-config]
+  (let [conformed (try-conform ::mount-config mount-config)
         {:keys [::share-mount]} conformed]
-    (format "umount %s" share-mount)))
+    (format "sudo umount %s" share-mount)))
 
-(defn run-unmount-backups-share! [config]
-  (let [command (->unmount-command config)]
+(defn run-unmount-backups-share! [mount-config]
+  (let [command (->unmount-command mount-config)]
     (backups.core/run-sh command)))
 
-(defn run-unmount-backups-share-m! [config]
-  (let [result (run-unmount-backups-share! config)]
+(defn run-unmount-backups-share-m! [mount-config]
+  (let [result (run-unmount-backups-share! mount-config)]
     (backups.core/sh->either result)))
 
-(defn unmount-backups-share-m! [config]
+(defn unmount-backups-share-m! [mount-config]
   (log-header "Unmounting Backups share")
 
-  (run-unmount-backups-share-m! config))
+  (when-not-nil-m
+   mount-config
+   (fn [] (cats/do-let (try-conform-m ::mount-config mount-config)
+                       (run-unmount-backups-share-m! mount-config)))))
 
 ; endregion
 
