@@ -10,13 +10,6 @@
             [scheduling.shutdown :as vshutdown]
             [scheduling.vbox :as vbox]))
 
-; todo
-;   * mount the backup share via `gio mount` to avoid need to execute as root
-;   * rsync instead of cifs mount?
-;     * prompt for each rsync source directory?
-;     * could mounting on the host create a symlink for /mnt/backups that points to the current drive?
-;   * wrap use of try-conform with cats.monad.exception/try
-
 (def ^:dynamic *logging-enabled?* false)
 
 (s/def ::username string?)

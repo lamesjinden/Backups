@@ -22,36 +22,8 @@
   ([file-name] (console/println-green (format "%s: Executing" file-name)))
   ([] (print-start-message *file*)))
 
-(defn splitter
-  "
-  splits s on whitespace; respects _single_ quoted segments.
-
-  https://stackoverflow.com/a/4341978
-  "
-  [s]
-  ((fn step [xys]
-     (lazy-seq
-      (when-let [c (ffirst xys)]
-        (cond
-          (Character/isWhitespace ^char c)
-          (step (rest xys))
-          (= \' c)
-          (let [[w* r*]
-                (split-with (fn [[x y]]
-                              (or (not= \' x)
-                                  (not (or (nil? y)
-                                           (Character/isWhitespace ^char y)))))
-                            (rest xys))]
-            (if (= \' (ffirst r*))
-              (cons (apply str (map first w*)) (step (rest r*)))
-              (cons (apply str (map first w*)) nil)))
-          :else
-          (let [[w r] (split-with (fn [[x _y]] (not (Character/isWhitespace ^char x))) xys)]
-            (cons (apply str (map first w)) (step r)))))))
-   (partition 2 1 (lazy-cat s [nil]))))
-
 (defn run-sh [command-str]
-  (let [command-tokens (splitter command-str)]
+  (let [command-tokens (p/tokenize command-str)]
     (when *log-commands?*
       (println command-tokens))
     (apply sh command-tokens)))
@@ -77,7 +49,7 @@
       (:out)
       (cats/return)))
 
-(defn run-process
+#_(defn run-process
   "Lower-level subproc facility, based on Babashka.Process"
   ([command {:keys [out-file] :as opts}]
    (when *log-commands?*
@@ -97,9 +69,16 @@
          proc (p/process
                command
                combined-opts)]
-     (deref proc)))
+     (deref proc)))   
   ([command]
    (run-process command {})))
+
+(defn run-process [command]
+  (let [options {:continue true}
+        shell-result (p/shell options command)]
+    (-> shell-result
+        (update :out (fn [prev] (slurp prev)))
+        (update :err (fn [prev] (slurp prev))))))
 
 ; endregion
 
