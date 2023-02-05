@@ -413,6 +413,24 @@
 
 ; region main
 
+(defn just-mount
+  "
+  Top-level function used to unlock and mount.
+
+  Expects the following arguments:
+  * volume-id   - the UUID of the volume to unlock and mount
+  * mount-point - the location to mount the volume
+  * [optional] starting-fn - a parameter-less callback function invoked prior to the operation
+  * [optional] result-fn   - a single parameter callback function that accepts an instance of 'either';
+                             invoked at the conclusion of the operation."
+  ([volume-id mount-point & {:keys [starting-fn result-fn]
+                             :or   {starting-fn print-start-message
+                                    result-fn   handle-result}}]
+   (starting-fn)
+   (let [result (cats/do-let (unlock-volume-m! volume-id)
+                             (mount-volume-m! volume-id mount-point))]
+     (result-fn result))))
+
 (defn mount-and-share
   "
   Top-level function used to unlock, mount, and share the specified volume.
@@ -432,6 +450,25 @@
    (let [result (cats/do-let (unlock-volume-m! volume-id)
                              (mount-volume-m! volume-id mount-point)
                              (create-share-m! share-name mount-point options))]
+     (result-fn result))))
+
+(defn just-unmount
+  "
+  Top-level function used to unmount and lock the specified volume.
+
+  Expects the following arguments:
+  * volume-id   - the UUID of the volume to unmount and lock
+  * mount-point - the location of the mounted volume
+  * [optional] starting-fn - a parameter-less callback function invoked prior to the operation
+  * [optional] result-fn   - a single parameter callback function that accepts an instance of 'either';
+                             invoked at the conclusion of the operation.
+  "
+  ([volume-id mount-point & {:keys [starting-fn result-fn]
+                             :or   {starting-fn print-start-message
+                                    result-fn   handle-result}}]
+   (starting-fn)
+   (let [result (cats/do-let (unmount-volume-m! volume-id mount-point)
+                             (lock-volume-m! volume-id))]
      (result-fn result))))
 
 (defn unshare-and-unmount
