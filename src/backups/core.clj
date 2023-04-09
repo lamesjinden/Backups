@@ -4,7 +4,6 @@
             [cats.core :as cats]
             [cats.monad.either :as either]
             [cats.monad.maybe :as maybe]
-            [clojure.java.io :as io]
             [clojure.java.shell :refer [sh]]
             [clojure.string :as str]))
 
@@ -49,33 +48,11 @@
       (:out)
       (cats/return)))
 
-#_(defn run-process
-  "Lower-level subproc facility, based on Babashka.Process"
-  ([command {:keys [out-file] :as opts}]
-   (when *log-commands?*
-     (println command))
-   (let [inherit-io (not out-file)
-         default-opts {:shutdown p/destroy-tree}
-         stream-opts (if inherit-io
-                       {:inherit true}
-                       (do
-                         (with-open [w (io/writer out-file)]
-                           (.write w (format "%s\n" command)))
-                         (let [output-stream (java.io.FileOutputStream. ^String out-file true)]
-                           {:inherit false
-                            :out     output-stream
-                            :err     output-stream})))
-         combined-opts (merge default-opts opts stream-opts)
-         proc (p/process
-               command
-               combined-opts)]
-     (deref proc)))   
-  ([command]
-   (run-process command {})))
-
 (defn run-process [command]
   (let [options {:continue true}
         shell-result (p/shell options command)]
+    (when *log-commands?*
+      (println command))
     (-> shell-result
         (update :out (fn [prev] (slurp prev)))
         (update :err (fn [prev] (slurp prev))))))

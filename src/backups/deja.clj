@@ -32,6 +32,11 @@
                                         ::duplicity-exclude-dirs
                                         ::duplicity-destination]))
 
+(s/def ::prune-args (s/+ string?))
+(s/def ::prune-destination ::duplicity-destination)
+(s/def ::prune-config (s/keys :req [::prune-args
+                                    ::prune-destination]))
+
 (s/def ::rsync-source-dir (s/and string? #(not (str/ends-with? % "/"))))
 (s/def ::rsync-source-dirs (s/* ::rsync-source-dir))
 (s/def ::rsync-destination string?)
@@ -44,6 +49,7 @@
 (s/def ::result-fn fn?)
 (s/def ::deja-config (s/keys :opt [::mount-config
                                    ::duplicity-config
+                                   ::prune-config
                                    ::rsync-config
                                    ::start-fn
                                    ::result-fn]))
@@ -94,44 +100,6 @@
 
 (defn- try-conform-m [spec x]
   (cats-ex/try-on (try-conform spec x)))
-
-; region mounting
-
-(defn ->mount-command
-  "
-  returns a valid `mount` command for a cifs mount.
-  throws if mount-config does not conform.
-  "
-  [mount-config]
-  (let [conformed (try-conform ::mount-config mount-config)
-        {:keys [::share-url ::share-mount ::id]} conformed
-        {:keys [::username ::domain ::userid ::groupid]} id
-        command (format "sudo mount -t cifs -o username=%s,dom=%s,uid=%s,gid=%s %s %s"
-                        username
-                        domain
-                        userid
-                        groupid
-                        share-url
-                        share-mount)]
-    command))
-
-(defn run-mount-backups! [mount-config]
-  (let [command (->mount-command mount-config)]
-    ; note: using run-sh caused a delay (longer than 60 seconds), awaiting to be prompted for cifs credentials.
-    ;       switching to run-process does not display the above behavior.
-    (core/run-process command)))
-
-(defn run-mount-backups-m! [mount-config]
-  (let [result (run-mount-backups! mount-config)]
-    (backups.core/sh->either result [0 32])))
-
-(defn mount-backups-share-m! [mount-config]
-  (log-header "Mounting Backups share")
-
-  (when-not-nil-m
-   mount-config
-   (fn [] (cats/do-let (try-conform-m ::mount-config mount-config)
-                       (run-mount-backups-m! mount-config)))))
 
 ; endregion
 
@@ -202,13 +170,43 @@
                           duplicity-include-dirs
                           (fn [] (run-duplicity-backup-m! duplicity-config))))))))
 
+(def duplicity-prune-default-args ["remove-all-but-n-full 1"
+                                   "--force"])
+
+(defn ->duplicity-prune-command [prune-config]
+  (let [conformed (try-conform ::prune-config prune-config)
+        {:keys [::prune-args
+                ::prune-destination]} conformed
+        prune-args (str/join " " prune-args)
+        command (format "duplicity %s %s" prune-args prune-destination)]
+    command))
+
+(defn run-duplicity-prune-backups! [prune-config]
+  (let [command (->duplicity-prune-command prune-config)]
+    (backups.core/run-process command)))
+
+(defn run-duplicity-prune-backups-m! [prune-config]
+  (let [result (run-duplicity-prune-backups! prune-config)]
+    (backups.core/sh->either result)))
+
+(defn prune-managed-backups-m! [prune-config]
+  (log-header "Pruning existing managed backups")
+
+  (when-not-nil-m
+   prune-config
+   (fn [] (cats/do-let (try-conform-m ::prune-config prune-config)
+                       (let [{:keys [::prune-destination]} prune-config]
+                         (when-not-empty-m
+                          prune-destination
+                          (fn [] (run-duplicity-prune-backups-m! prune-config))))))))
+
 ; endregion
 
 ; region rsync
 
 ;; "--dry-run"
-(def rsync-default-args ["-avuz" 
-                         "--delete" 
+(def rsync-default-args ["-avuz"
+                         "--delete"
                          "--progress"
                          "--timeout=120"])
 
@@ -260,52 +258,22 @@
 
 ; endregion
 
-; region unmount
-
-(defn ->unmount-command
-  "
-  returns a valid `umount` command for unmounting the cifs share.
-  throws if mount-config does not conform.
-  "
-  [mount-config]
-  (let [conformed (try-conform ::mount-config mount-config)
-        {:keys [::share-mount]} conformed]
-    (format "sudo umount %s" share-mount)))
-
-(defn run-unmount-backups-share! [mount-config]
-  (let [command (->unmount-command mount-config)]
-    (backups.core/run-sh command)))
-
-(defn run-unmount-backups-share-m! [mount-config]
-  (let [result (run-unmount-backups-share! mount-config)]
-    (backups.core/sh->either result)))
-
-(defn unmount-backups-share-m! [mount-config]
-  (log-header "Unmounting Backups share")
-
-  (when-not-nil-m
-   mount-config
-   (fn [] (cats/do-let (try-conform-m ::mount-config mount-config)
-                       (run-unmount-backups-share-m! mount-config)))))
-
-; endregion
-
 ; region main
 
 (defn run [config]
   (let [conformed (try-conform ::deja-config config)
-        {:keys [::mount-config
-                ::duplicity-config
+        {:keys [::duplicity-config
+                ::prune-config
                 ::rsync-config
                 ::start-fn
                 ::result-fn]
          :or {start-fn backups.core/print-start-message
               result-fn backups.core/handle-result}} conformed]
     (start-fn)
-    (let [result (cats/do-let (mount-backups-share-m! mount-config)
-                              (take-managed-backup-m! duplicity-config)
-                              (take-unmanaged-backup-m! rsync-config)
-                              (unmount-backups-share-m! mount-config))]
+    (let [result (cats/do-let
+                  (prune-managed-backups-m! prune-config)
+                  (take-managed-backup-m! duplicity-config)
+                  (take-unmanaged-backup-m! rsync-config))]
       (result-fn result))))
 
 ; endregion
