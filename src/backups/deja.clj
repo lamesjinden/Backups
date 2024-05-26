@@ -107,7 +107,7 @@
 
 ;; "--dry-run"
 (def duplicity-default-args ["--no-encryption"
-                             "--full-if-older-than 60D"
+                             "--full-if-older-than 1Y"
                              "--volsize 1000"
                              "--timeout=120"
                              "--num-retries 5"
