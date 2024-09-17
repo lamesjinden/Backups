@@ -3,11 +3,12 @@
             [backups.console :as console]
             [cats.context :as cats-ctx]
             [cats.core :as cats]
-            [cats.monad.either :as cats-either]
+            [cats.monad.either :as either]
             [cats.monad.exception :as cats-ex]
             [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [scheduling.shutdown :as vshutdown]
+            [scheduling.startup :as vstartup]
             [scheduling.vbox :as vbox]))
 
 (def ^:dynamic *logging-enabled?* false)
@@ -76,7 +77,7 @@
   (if (nil? config)
     (do
       (log-skipped)
-      (cats-either/right nil))
+      (either/right nil))
     (mf)))
 
 (defn- when-not-empty-m
@@ -88,7 +89,7 @@
   (if (empty? coll)
     (do
       (log-noop)
-      (cats-either/right nil))
+      (either/right nil))
     (mf)))
 
 (defn- try-conform [spec x]
@@ -210,16 +211,29 @@
                          "--progress"
                          "--timeout=120"])
 
+(defn start-vm! [vm]
+  (vstartup/fancy-startup vm))
+
+(defn start-vm-m! [vm]
+  (either/try-either (start-vm! vm)))
+
+(defn start-vms-m! [vms]
+  (cats-ctx/with-context cats-ex/context
+    (cats/mlet [_stop-results (cats/mapseq start-vm-m! vms)]
+               (either/right vms))))
+
 (defn stop-running-vm! [vm]
   (vshutdown/fancy-shutdown vm))
 
 (defn stop-running-vm-m! [vm]
-  (cats-either/try-either (stop-running-vm! vm)))
+  (either/try-either (stop-running-vm! vm)))
 
 (defn stop-running-vms-m! []
-  (let [running-vms (vbox/get-all-running-vms)]
+  (let [running-vms (->> (vbox/get-all-running-vms)
+                         (map (fn [m] (merge {:start-type :separate} m))))]
     (cats-ctx/with-context cats-ex/context
-      (cats/mapseq stop-running-vm-m! running-vms))))
+      (cats/mlet [_stop-results (cats/mapseq stop-running-vm-m! running-vms)]
+                 (either/right running-vms)))))
 
 (defn ->rsync-command [rsync-config rsync-source-dir]
   (let [conformed (try-conform ::rsync-config rsync-config)
@@ -253,8 +267,9 @@
                   (let [{:keys [::rsync-source-dirs]} rsync-config]
                     (when-not-empty-m
                      rsync-source-dirs
-                     (fn [] (cats/do-let (stop-running-vms-m!)
-                                         (run-rsync-backups-m! rsync-config rsync-source-dirs)))))))))
+                     (fn [] (cats/mlet [stopped-vms (stop-running-vms-m!)
+                                        _rsync-backups (run-rsync-backups-m! rsync-config rsync-source-dirs)]
+                                       (start-vms-m! stopped-vms)))))))))
 
 ; endregion
 
