@@ -219,7 +219,7 @@
 
 (defn start-vms-m! [vms]
   (cats-ctx/with-context cats-ex/context
-    (cats/mlet [_stop-results (cats/mapseq start-vm-m! vms)]
+    (cats/mlet [_start-results (cats/mapseq start-vm-m! vms)]
                (either/right vms))))
 
 (defn stop-running-vm! [vm]
@@ -230,7 +230,9 @@
 
 (defn stop-running-vms-m! []
   (let [running-vms (->> (vbox/get-all-running-vms)
-                         (map (fn [m] (merge {:start-type :separate} m))))]
+                         (map (fn [{:keys [name] :as m}]
+                                (assoc m :start-type (or (vbox/get-running-vm-type name)
+                                                         :headless)))))]
     (cats-ctx/with-context cats-ex/context
       (cats/mlet [_stop-results (cats/mapseq stop-running-vm-m! running-vms)]
                  (either/right running-vms)))))

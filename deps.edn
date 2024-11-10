@@ -2,5 +2,5 @@
          org.babashka/spec.alpha {:git/url "https://github.com/babashka/spec.alpha"
                                   :git/sha "1a841c4cc1d4f6dab7505a98ed2d532dd9d56b78"}
          com.github.lamesjinden/vm-automation {:deps/manifest :deps
-                                               :git/sha "b7b0b0a7030d204b39a452ac6e1f9c64d7dab53a"}
+                                               :git/sha "8f7729f4894a000212d50a1a6056dd2d68f1c7ba"}
          babashka/process {:mvn/version "0.2.9"}}}
