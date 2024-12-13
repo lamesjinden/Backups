@@ -211,8 +211,13 @@
                          "--progress"
                          "--timeout=120"])
 
-(defn start-vm! [vm]
-  (vstartup/fancy-startup vm))
+(defn start-vm! [{:keys [current-snapshot name] :as vm}]
+  (vstartup/fancy-startup vm)
+  ;; if this VM did not have a snapshot at the time of 'stop-running-vms-m!
+  ;; then, when it's restarted, return it to a state that also has no snapshots
+  (when-not current-snapshot
+    (vbox/delete-recent-off-snapshot! name)
+    (vbox/delete-recent-running-snapshot! name)))
 
 (defn start-vm-m! [vm]
   (either/try-either (start-vm! vm)))
@@ -231,8 +236,10 @@
 (defn stop-running-vms-m! []
   (let [running-vms (->> (vbox/get-all-running-vms)
                          (map (fn [{:keys [name] :as m}]
-                                (assoc m :start-type (or (vbox/get-running-vm-type name)
-                                                         :headless)))))]
+                                (-> m
+                                    (assoc :current-snapshot (vbox/get-current-snapshot name))
+                                    (assoc :start-type (or (vbox/get-running-vm-type name)
+                                                           :headless))))))]
     (cats-ctx/with-context cats-ex/context
       (cats/mlet [_stop-results (cats/mapseq stop-running-vm-m! running-vms)]
                  (either/right running-vms)))))
